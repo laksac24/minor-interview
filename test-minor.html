@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Interview Bot — Test 2</title>
+  <style>
+    body { font-family: monospace; max-width: 600px; margin: 60px auto; padding: 0 20px; background: #0f0f0f; color: #e0e0e0; }
+    h2 { color: #7ee787; }
+    label { display: block; margin-top: 14px; font-size: 12px; color: #8b949e; }
+    textarea { width: 100%; box-sizing: border-box; margin-top: 4px; padding: 10px; background: #161b22; color: #e0e0e0; border: 1px solid #30363d; border-radius: 6px; font-family: monospace; font-size: 12px; }
+    #analysisInput { height: 160px; }
+    button { padding: 10px 24px; margin: 8px 4px 8px 0; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: monospace; }
+    #startBtn  { background: #238636; color: #fff; }
+    #stopBtn   { background: #da3633; color: #fff; display: none; }
+    #status    { margin-top: 20px; padding: 12px; background: #161b22; border-radius: 6px; min-height: 40px; white-space: pre-wrap; }
+    #log       { margin-top: 12px; padding: 12px; background: #161b22; border-radius: 6px; height: 200px; overflow-y: auto; font-size: 12px; color: #8b949e; }
+    #scoreCard { display: none; margin-top: 20px; padding: 16px; background: #161b22; border-radius: 6px; border: 1px solid #238636; }
+    #scoreCard h3 { color: #7ee787; margin: 0 0 12px; }
+    .factor { display: flex; justify-content: space-between; margin: 6px 0; }
+    .bar { height: 8px; background: #238636; border-radius: 4px; margin-top: 4px; }
+    .overall { margin-top: 14px; font-size: 18px; color: #7ee787; font-weight: bold; }
+    .summary { margin-top: 10px; color: #8b949e; font-size: 12px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <h2>AI Interview Bot — Local Test 2</h2>
+
+  <label for="analysisInput">Resume analysis JSON (paste the full response, or just its "data" object)</label>
+  <textarea id="analysisInput" placeholder='{"success": true, "data": { "overallScore": 64, "content": {...}, "skills": {...} }}'></textarea>
+
+  <button id="startBtn">Start Interview</button>
+  <button id="stopBtn">End Call</button>
+
+  <div id="status">Paste the analysis JSON, then press "Start Interview".</div>
+  <div id="log"></div>
+  <div id="scoreCard">
+    <h3>Interview Score</h3>
+    <div id="scoreContent"></div>
+  </div>
+
+  <script type="module">
+    import Vapi from "https://esm.sh/@vapi-ai/web";
+
+    const API_BASE = "http://localhost:8000"; // Change if your backend is running elsewhere
+
+    const statusEl   = document.getElementById("status");
+    const logEl      = document.getElementById("log");
+    const startBtn   = document.getElementById("startBtn");
+    const stopBtn    = document.getElementById("stopBtn");
+    const analysisEl = document.getElementById("analysisInput");
+
+    let vapi = null;
+    // Build transcript locally from VAPI message events
+    const transcriptLines = [];
+
+    // Silence detection
+    let silenceTimer = null;
+    let closingTimer = null;
+
+    function resetSilenceTimer() {
+      clearTimeout(silenceTimer);
+      clearTimeout(closingTimer);
+
+      // After 15s of candidate silence, nudge Jiya to check in
+      silenceTimer = setTimeout(() => {
+        if (!vapi) return;
+        log("15s silence detected — prompting Jiya to check in");
+        vapi.send({
+          type: "add-message",
+          message: {
+            role: "system",
+            content: "The candidate has been silent for 15 seconds. Gently ask if they are still there.",
+          },
+        });
+
+        // If still silent after another 15s, wrap up and end
+        closingTimer = setTimeout(() => {
+          if (!vapi) return;
+          log("30s total silence — prompting Jiya to close the interview");
+          vapi.send({
+            type: "add-message",
+            message: {
+              role: "system",
+              content: "The candidate is still not responding. Wrap up the interview with a polite closing phrase and say goodbye.",
+            },
+          });
+        }, 15000);
+      }, 15000);
+    }
+
+    function stopSilenceTimer() {
+      clearTimeout(silenceTimer);
+      clearTimeout(closingTimer);
+    }
+
+    function log(msg) {
+      const line = document.createElement("div");
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function escapeHtml(str) {
+      return String(str ?? "").replace(/[&<>"']/g, (c) => (
+        { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+      ));
+    }
+
+    // Accepts either the full API response ({success, data}) or just the data object.
+    function readAnalysis() {
+      const raw = analysisEl.value.trim();
+      if (!raw) return null;
+      const parsed = JSON.parse(raw); // throws on invalid JSON
+      return parsed.data ?? parsed;
+    }
+
+    // Keys match the backend SCORE_PROMPT in app.py
+    function renderScore(score) {
+      if (score.error) {
+        document.getElementById("scoreContent").textContent = `Scoring failed: ${score.error}`;
+        document.getElementById("scoreCard").style.display = "block";
+        return;
+      }
+
+      const factors = [
+        ["technical_knowledge",  "Technical Knowledge"],
+        ["communication_skills", "Communication Skills"],
+        ["problem_solving",      "Problem Solving"],
+        ["system_design",        "System Design"],
+        ["confidence",           "Confidence"],
+      ];
+
+      let html = factors.map(([key, label]) => {
+        const { score: s = 0, detail = "" } = score[key] || {};
+        return `
+          <div class="factor"><span>${label}</span><span>${s}/10</span></div>
+          <div class="bar" style="width:${s * 10}%"></div>
+          <div style="font-size:11px;color:#8b949e;margin:3px 0 10px;">${escapeHtml(detail)}</div>
+        `;
+      }).join("");
+
+      html += `<div class="overall">Overall: ${score.overall}/10</div>`;
+      html += `<div class="summary">${escapeHtml(score.summary)}</div>`;
+
+      document.getElementById("scoreContent").innerHTML = html;
+      document.getElementById("scoreCard").style.display = "block";
+    }
+
+    async function requestScore() {
+      const transcript = transcriptLines.join("\n");
+      if (!transcript.trim()) { log("No transcript to score."); return; }
+      log("Sending transcript to backend for scoring...");
+      try {
+        const res = await fetch(`${API_BASE}/api/interview/score`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transcript }),
+        });
+        if (res.ok) {
+          renderScore(await res.json());
+          statusEl.textContent = "Score ready!";
+        } else {
+          const err = await res.json();
+          log(`Score error: ${err.detail}`);
+        }
+      } catch (e) {
+        log(`Score request failed: ${e.message}`);
+      }
+    }
+
+    startBtn.addEventListener("click", async () => {
+      transcriptLines.length = 0;
+      document.getElementById("scoreCard").style.display = "none";
+
+      let resumeAnalysis = null;
+      try {
+        resumeAnalysis = readAnalysis();
+      } catch (e) {
+        statusEl.textContent = `Analysis JSON is not valid: ${e.message}`;
+        return;
+      }
+      if (!resumeAnalysis) {
+        statusEl.textContent = "Paste the resume analysis JSON first.";
+        return;
+      }
+
+      statusEl.textContent = "Fetching assistant config from backend...";
+      log("POST /api/interview/start");
+
+      try {
+        const res = await fetch(`${API_BASE}/api/interview/start`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            resume_analysis: resumeAnalysis,
+            previous_qa: [],
+          }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail ? JSON.stringify(err.detail) : `HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+        log("Got assistant config + public key");
+
+        vapi = new Vapi(data.vapi_public_key);
+
+        vapi.on("call-start", () => {
+          statusEl.textContent = "Call started — Jiya will speak first.";
+          log("call-start");
+          resetSilenceTimer();
+        });
+        vapi.on("call-end", async () => {
+          statusEl.textContent = "Call ended. Generating score...";
+          log("call-end");
+          stopSilenceTimer();
+          stopBtn.style.display = "none";
+          startBtn.style.display = "";
+          await requestScore();
+        });
+        vapi.on("speech-start", () => { stopSilenceTimer(); log("Jiya speaking..."); });
+        vapi.on("speech-end",   () => { resetSilenceTimer(); log("Jiya done speaking"); });
+        vapi.on("message", (m) => {
+          if (m.type === "transcript" && m.transcriptType === "final") {
+            const line = `${m.role === "assistant" ? "Jiya" : "Candidate"}: ${m.transcript}`;
+            transcriptLines.push(line);
+            log(line);
+            // Reset silence timer only when the candidate speaks
+            if (m.role === "user") resetSilenceTimer();
+          }
+        });
+        vapi.on("error", (e) => {
+          const msg = JSON.stringify(e, null, 2);
+          statusEl.textContent = `Error: ${msg}`;
+          log(`error: ${msg}`);
+          console.error("VAPI error:", e);
+        });
+
+        await vapi.start(data.assistant);
+
+        startBtn.style.display = "none";
+        stopBtn.style.display  = "";
+      } catch (err) {
+        statusEl.textContent = `Failed: ${err.message}`;
+        log(`error: ${err.message}`);
+      }
+    });
+
+    stopBtn.addEventListener("click", () => {
+      stopSilenceTimer();
+      vapi?.stop();
+      stopBtn.style.display  = "none";
+      startBtn.style.display = "";
+    });
+  </script>
+</body>
+</html>
