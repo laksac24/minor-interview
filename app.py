@@ -160,7 +160,7 @@ def build_assistant(
                 }
             ],
             "temperature": 0.7,
-            "maxTokens": 150,
+            "maxTokens": 600,
         },
         "voice": {
             "provider": "11labs",
@@ -185,7 +185,7 @@ def build_assistant(
         "recordingEnabled": False,
         "silenceTimeoutSeconds": 30,
         "maxDurationSeconds": 600,
-        "backgroundDenoisingEnabled": False,
+        "backgroundDenoisingEnabled": True,
     }
 
 
