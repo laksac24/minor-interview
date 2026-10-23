@@ -8,11 +8,18 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from groq import Groq
 from pydantic import BaseModel
+import httpx
+from fastapi import UploadFile, File, Form
+from fastapi.responses import JSONResponse
+
+
+
 
 load_dotenv()
 
 VAPI_API_KEY = os.environ.get("VAPI_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+RESUME_API_URL = os.environ.get("RESUME_API_URL", "").rstrip("/")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
@@ -323,3 +330,28 @@ async def vapi_webhook(request: Request):
         print(f"[STATUS] {message.get('status')}")
 
     return {"received": True}
+
+
+@app.post("/api/resume/analyze")
+async def analyze_resume(
+    file: UploadFile = File(...),
+    target_role: str = Form(...),
+):
+    if not RESUME_API_URL:
+        raise HTTPException(status_code=500, detail="RESUME_API_URL not configured")
+
+    content = await file.read()
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            r = await client.post(
+                f"{RESUME_API_URL}/analyze-resume",
+                files={"file": (file.filename, content, file.content_type or "application/pdf")},
+                data={"target_role": target_role},
+            )
+        try:
+            body = r.json()
+        except ValueError:
+            body = {"detail": r.text[:300]}
+        return JSONResponse(status_code=r.status_code, content=body)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Resume service unreachable: {e}")
